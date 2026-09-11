@@ -230,15 +230,15 @@ export default function EVLAnalyticsView() {
             </div>
 
             {/* Groq AI Chatbox for Kundali History */}
-            {debouncedPartNumber && (
+            
               <div className="bg-white p-6 border border-gray-200 rounded-xl shadow-sm mt-6">
                 <h3 className="text-lg font-semibold text-gray-800 mb-4 flex items-center gap-2">
                   <svg className="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path></svg>
-                  Ask Groq AI about Part History (Kundali)
+                  {debouncedPartNumber ? `Ask Groq AI about Part History (Kundali)` : `Ask Groq AI about the Supply Chain Overview`}
                 </h3>
                 <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 h-64 overflow-y-auto mb-4 flex flex-col gap-3">
                   {chatHistory.length === 0 ? (
-                    <p className="text-gray-400 text-center mt-20">Ask me what the historical demand or backlog was for this part in any month!</p>
+                    <p className="text-gray-400 text-center mt-20">{debouncedPartNumber ? "Ask me what the historical demand or backlog was for this part in any month!" : "Ask me general questions about our global backlog, inventory shortages, and total demand!"}</p>
                   ) : (
                     chatHistory.map((msg, i) => (
                       <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
@@ -282,7 +282,7 @@ export default function EVLAnalyticsView() {
                     type="text" 
                     value={chatQuestion}
                     onChange={(e) => setChatQuestion(e.target.value)}
-                    placeholder={`Ask about ${debouncedPartNumber}'s history...`}
+                    placeholder={debouncedPartNumber ? `Ask about ${debouncedPartNumber}'s history...` : "Ask about our global supply chain overview..."}
                     className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                   <button 
@@ -294,7 +294,6 @@ export default function EVLAnalyticsView() {
                   </button>
                 </form>
               </div>
-            )}
 
           </div>
         )}
