@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "https://YOUR_RENDER_URL.onrender.com/$1"
+      "destination": "https://forcastit-backend.onrender.com/$1"
     },
     {
       "source": "/(.*)",
