@@ -1,13 +1,205 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import io
-import datetime
-import json
-import numpy as np
-import openpyxl
+from typing import Optional
+import os
+from groq import Groq
+from dotenv import load_dotenv
+load_dotenv()
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
+# Import new modules
+from auth import get_current_username
+from engine import ingest_data, get_analytics
+
+groq_client = Groq()
+
+app = FastAPI(title="EVL Supply Chain Analytics Platform")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+def read_excel_file(file_obj: UploadFile) -> pd.DataFrame:
+    if not file_obj or not file_obj.filename:
+        return pd.DataFrame()
+    try:
+        contents = file_obj.file.read()
+        file_obj.file.seek(0)
+        return pd.read_excel(io.BytesIO(contents))
+    except Exception as e:
+        print(f"Error reading {file_obj.filename}: {e}")
+        return pd.DataFrame()
+
+@app.post("/v1/ingest")
+async def ingest_api(
+    demand_file: UploadFile = File(None),
+    shipment_file: UploadFile = File(None),
+    booking_file: UploadFile = File(None),
+    pos_file: UploadFile = File(None),
+    stock_file: UploadFile = File(None),
+    username: str = Depends(get_current_username)
+):
+    try:
+        demand_df = read_excel_file(demand_file)
+        shipment_df = read_excel_file(shipment_file)
+        booking_df = read_excel_file(booking_file)
+        pos_df = read_excel_file(pos_file)
+        stock_df = read_excel_file(stock_file)
+        
+        result = ingest_data(demand_df, shipment_df, booking_df, pos_df, stock_df)
+        return result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/v1/analytics/insights")
+async def analytics_insights_api(
+    series: Optional[str] = Query(None),
+    part_number: Optional[str] = Query(None),
+    granularity: str = Query("monthly"),
+    username: str = Depends(get_current_username)
+):
+    try:
+        data = get_analytics(series, part_number, granularity)
+        if not data.get("data"):
+            return {"insight": "No data available to generate insights."}
+            
+        data_str = str(data["data"])
+        
+        prompt = f"""
+You are an expert Supply Chain Manager for Everlight Electronics.
+Analyze the following supply chain data for part '{part_number or 'All'}' (Series: '{series or 'All'}').
+The data includes Customer Demand, POS (Sales), Inventory, EVL Booking, and EVL Shipment over time.
+Data: {data_str}
+
+Provide a concise, 3-4 sentence managerial summary explaining the trends. Focus on why sales might have dropped or spiked (e.g. comparing inventory levels vs demand), and highlight any upcoming stockout risks. Do not just list the numbers.
+"""
+        chat_completion = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="openai/gpt-oss-20b",
+            temperature=0.3,
+        )
+        
+        insight = chat_completion.choices[0].message.content
+        return {"insight": insight}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+from pydantic import BaseModel
+class ChatRequest(BaseModel):
+    part_number: str
+    question: str
+
+@app.post("/v1/chat")
+async def chat_api(req: ChatRequest, username: str = Depends(get_current_username)):
+    try:
+        from db import get_db_connection
+        from classifier import normalize_part_number
+        from sqlalchemy import text
+        import pandas as pd
+        
+        part = normalize_part_number(req.part_number)
+        engine = get_db_connection()
+        query = text('''
+            SELECT record_date, customer_demand, evl_shipment as loaded_po, pending_po, evl_booking as healthy_backlog, at_risk_backlog, pos, inventory 
+            FROM supply_chain_data 
+            WHERE normalized_part = :part 
+            ORDER BY record_date ASC
+        ''')
+        
+        with engine.connect() as conn:
+            df = pd.read_sql(query, conn, params={'part': part})
+            
+        if df.empty:
+            history_context = "No data found for this part."
+        else:
+            # Group by record_date since there might be multiple entries per day
+            pivot = df.groupby('record_date').sum().fillna(0)
+            history_context = pivot.to_csv()
+
+        prompt = f'''
+You are an expert Supply Chain AI Assistant for Everlight Electronics.
+The user is asking a question about the part number: {req.part_number}.
+Here is the exact "Kundali" (raw history) of this part across all our files (Forecast, Backlog, POS, PO Tracker) organized by date:
+{history_context}
+
+User Question: {req.question}
+
+Please answer the user's question clearly, concisely, and accurately based on the data provided above.
+'''
+        chat_completion = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="groq/compound-mini",
+            temperature=0.2,
+        )
+        
+        return {"answer": chat_completion.choices[0].message.content}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/analytics/view")
+async def analytics_view_api(
+    series: Optional[str] = Query(None),
+    part_number: Optional[str] = Query(None),
+    granularity: str = Query("monthly", regex="^(monthly|quarterly|half_yearly|annual)$"),
+    username: str = Depends(get_current_username)
+):
+    try:
+        result = get_analytics(series, part_number, granularity)
+        return result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# --- LEGACY FORECASTIQ ROUTES ---
+import openpyxl
+import numpy as np
+from fastapi import Form
+from fastapi.responses import StreamingResponse
+
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+def get_file_stream(file_obj, name):
+    save_path = os.path.join(UPLOAD_DIR, f"{name}.xlsx")
+    if file_obj is not None:
+        file_bytes = file_obj.file.read()
+        with open(save_path, "wb") as f:
+            f.write(file_bytes)
+        return io.BytesIO(file_bytes)
+    elif os.path.exists(save_path):
+        with open(save_path, "rb") as f:
+            return io.BytesIO(f.read())
+    else:
+        raise Exception(f"Missing file for {name} and no saved file found.")
+
+@app.get("/v1/status")
+async def get_status():
+    has_saved = all([
+        os.path.exists(os.path.join(UPLOAD_DIR, "forecast.xlsx")),
+        os.path.exists(os.path.join(UPLOAD_DIR, "stock.xlsx")),
+        os.path.exists(os.path.join(UPLOAD_DIR, "backlog.xlsx")),
+        os.path.exists(os.path.join(UPLOAD_DIR, "po.xlsx"))
+    ])
+    return {"has_saved_files": has_saved}
 
 def get_all_sheets_info(file_obj):
     file_bytes = file_obj.read()
@@ -40,15 +232,7 @@ def get_all_sheets_info(file_obj):
             df = pd.read_csv(io.BytesIO(file_bytes), nrows=10)
             return {"sheets": ["Sheet1"], "active": "Sheet1", "data": {"Sheet1": df}}
 
-app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 def clean_data(df):
     for col in df.columns:
@@ -71,10 +255,10 @@ def convert_datetime_cols(df):
 
 @app.post("/get_file_info")
 async def get_file_info(
-    forecast_file: UploadFile = File(...),
-    stock_file: UploadFile = File(...),
-    backlog_file: UploadFile = File(...),
-    po_file: UploadFile = File(...)
+    forecast_file: UploadFile = File(None),
+    stock_file: UploadFile = File(None),
+    backlog_file: UploadFile = File(None),
+    po_file: UploadFile = File(None)
 ):
     try:
         files = {
@@ -346,10 +530,10 @@ def process_report(forecast_file, stock_file, backlog_file, po_file, config):
 
 @app.post("/generate_preview")
 async def generate_preview(
-    forecast_file: UploadFile = File(...),
-    stock_file: UploadFile = File(...),
-    backlog_file: UploadFile = File(...),
-    po_file: UploadFile = File(...),
+    forecast_file: UploadFile = File(None),
+    stock_file: UploadFile = File(None),
+    backlog_file: UploadFile = File(None),
+    po_file: UploadFile = File(None),
     config: str = Form(...)
 ):
     try:
@@ -364,10 +548,10 @@ async def generate_preview(
 
 @app.post("/generate_report")
 async def generate_report(
-    forecast_file: UploadFile = File(...),
-    stock_file: UploadFile = File(...),
-    backlog_file: UploadFile = File(...),
-    po_file: UploadFile = File(...),
+    forecast_file: UploadFile = File(None),
+    stock_file: UploadFile = File(None),
+    backlog_file: UploadFile = File(None),
+    po_file: UploadFile = File(None),
     config: str = Form(...)
 ):
     try:
@@ -388,6 +572,19 @@ async def generate_report(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Serve static assets
+if os.path.isdir("../frontend/dist/assets"):
+    app.mount("/assets", StaticFiles(directory="../frontend/dist/assets"), name="assets")
+
+# Catch-all route for SPA
+@app.get("/{full_path:path}")
+async def serve_spa(full_path: str):
+    dist_path = os.path.join("../frontend/dist", full_path)
+    if os.path.isfile(dist_path):
+        return FileResponse(dist_path)
+    return FileResponse("../frontend/dist/index.html")
 
 if __name__ == "__main__":
     import uvicorn
