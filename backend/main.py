@@ -109,27 +109,48 @@ async def chat_api(req: ChatRequest, username: str = Depends(get_current_usernam
         from classifier import normalize_part_number
         from sqlalchemy import text
         import pandas as pd
+        import json
         
-        part = normalize_part_number(req.part_number)
-        engine = get_db_connection()
-        query = text('''
-            SELECT record_date, customer_demand, evl_shipment as loaded_po, pending_po, evl_booking as healthy_backlog, at_risk_backlog, pos, inventory 
-            FROM supply_chain_data 
-            WHERE normalized_part = :part 
-            ORDER BY record_date ASC
-        ''')
-        
-        with engine.connect() as conn:
-            df = pd.read_sql(query, conn, params={'part': part})
+        if not req.part_number:
+            # Global Chat
+            from engine import get_analytics
+            analytics_data = get_analytics(None, None, 'monthly', 8)
+            kpis = analytics_data['kpis']
+            chart_data = pd.DataFrame(analytics_data['chart_data']).to_csv(index=False)
             
-        if df.empty:
-            history_context = "No data found for this part."
-        else:
-            # Group by record_date since there might be multiple entries per day
-            pivot = df.groupby('record_date').sum().fillna(0)
-            history_context = pivot.to_csv()
+            prompt = f'''
+You are an expert Supply Chain AI Assistant for Everlight Electronics.
+The user is asking a general question about the overall supply chain data.
+Here are the current top-level KPIs for all parts combined:
+{json.dumps(kpis, indent=2)}
 
-        prompt = f'''
+Here is the monthly aggregated trend data (Demand vs Supply vs Backlog):
+{chart_data}
+
+User Question: {req.question}
+
+Please answer the user's question clearly, concisely, and accurately based on the overall data provided above.
+'''
+        else:
+            part = normalize_part_number(req.part_number)
+            engine = get_db_connection()
+            query = text('''
+                SELECT record_date, customer_demand, evl_shipment as loaded_po, pending_po, evl_booking as healthy_backlog, at_risk_backlog, pos, inventory 
+                FROM supply_chain_data 
+                WHERE normalized_part = :part 
+                ORDER BY record_date ASC
+            ''')
+            
+            with engine.connect() as conn:
+                df = pd.read_sql(query, conn, params={'part': part})
+                
+            if df.empty:
+                history_context = "No data found for this part."
+            else:
+                pivot = df.groupby('record_date').sum().fillna(0)
+                history_context = pivot.to_csv()
+
+            prompt = f'''
 You are an expert Supply Chain AI Assistant for Everlight Electronics.
 The user is asking a question about the part number: {req.part_number}.
 Here is the exact "Kundali" (raw history) of this part across all our files (Forecast, Backlog, POS, PO Tracker) organized by date:
