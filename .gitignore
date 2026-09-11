@@ -9,7 +9,6 @@ __pycache__/
 gh_2.40.1_linux_amd64/
 .env
 *.jsonl
-*.txt
 patch_*.py
 run_*.py
 fix_*.py
@@ -24,3 +23,5 @@ backend/extract*.py
 backend/generate_now.py
 backend/parse_*.py
 frontend/index_patch.py
+.vercel
+.env*
